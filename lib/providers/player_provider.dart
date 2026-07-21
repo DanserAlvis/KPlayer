@@ -1,177 +1,170 @@
-import 'package:flutter/foundation.dart';
+import 'dart:async';
 import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
+import '../models/player_status.dart';
 import '../services/libmpv_service.dart';
 
 class PlayerProvider extends ChangeNotifier {
-  late LibmpvService _mpvService;
-  
+  PlayerProvider({LibmpvService? service})
+      : _service = service ?? LibmpvService() {
+    unawaited(initialize());
+  }
+
+  final LibmpvService _service;
+  Timer? _statusTimer;
+  bool _refreshing = false;
+
+  PlayerPhase phase = PlayerPhase.initializing;
   String? currentFile;
-  bool isPlaying = false;
-  bool isInitialized = false;
-  double currentPosition = 0;
-  double duration = 0;
-  
-  List audioTracks = [];
-  List subtitleTracks = [];
-  int selectedAudioTrack = 0;
-  int selectedSubtitleTrack = -1;
-  
-  List availableShaders = [];
   String? activeShader;
-  
-  bool amdFmfAvailable = false;
-  bool amdFmfEnabled = false;
-  
-  String playerInfo = '';
+  List<String> availableShaders = const [];
+  Duration position = Duration.zero;
+  Duration duration = Duration.zero;
+  String message = 'Iniciando libmpv…';
 
-  PlayerProvider() {
-    _mpvService = LibmpvService();
-    _initializePlayer();
-  }
+  bool get isInitialized => _service.isInitialized;
+  bool get isPlaying => phase == PlayerPhase.playing;
+  bool get hasMedia => currentFile != null;
+  bool get canSeek => duration > Duration.zero;
 
-  Future _initializePlayer() async {
+  Future<void> initialize() async {
     try {
-      await _mpvService.initialize();
-      availableShaders = await _mpvService.getAvailableShaders();
-      amdFmfAvailable = await _mpvService.checkAMDFluidMotion();
-      isInitialized = true;
-      playerInfo = 'Reproductor listo. Shaders: ${availableShaders.length}';
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
+      await _service.initialize();
+      await refreshShaders();
+      phase = PlayerPhase.ready;
+      message = 'Listo. El vídeo se abre en la ventana de libmpv.';
+      _statusTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+        unawaited(refreshStatus());
+      });
+    } on Object catch (error) {
+      phase = PlayerPhase.error;
+      message = '$error';
     }
+    notifyListeners();
   }
 
-  Future openFile(String path) async {
+  Future<void> openFile(String path) async {
+    if (!await File(path).exists()) {
+      _setError('No se encontró el archivo seleccionado.');
+      return;
+    }
     try {
-      if (!await File(path).exists()) {
-        playerInfo = 'Archivo no encontrado';
-        notifyListeners();
-        return;
-      }
-      await _mpvService.loadFile(path);
+      phase = PlayerPhase.loading;
+      message = 'Abriendo ${File(path).uri.pathSegments.last}…';
+      notifyListeners();
+      await _service.loadFile(path);
       currentFile = path;
-      playerInfo = 'Reproduciendo: ${File(path).uri.pathSegments.last}';
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
+      phase = PlayerPhase.playing;
+      message = File(path).uri.pathSegments.last;
+    } on Object catch (error) {
+      _setError('$error');
+      return;
     }
+    notifyListeners();
   }
 
-  Future play() async {
+  Future<void> togglePlayPause() async {
+    if (!hasMedia) return;
     try {
-      await _mpvService.play();
-      isPlaying = true;
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
-    }
-  }
-
-  Future pause() async {
-    try {
-      await _mpvService.pause();
-      isPlaying = false;
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
-    }
-  }
-
-  Future togglePlayPause() async {
-    isPlaying ? await pause() : await play();
-  }
-
-  Future seek(double position) async {
-    try {
-      await _mpvService.seek(position);
-      currentPosition = position;
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
-    }
-  }
-
-  Future applyShader(String shaderName) async {
-    try {
-      await _mpvService.applyShader(shaderName);
-      activeShader = shaderName;
-      playerInfo = 'Shader: $shaderName';
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
-    }
-  }
-
-  Future removeShader() async {
-    try {
-      await _mpvService.removeShader();
-      activeShader = null;
-      playerInfo = 'Shader removido';
-      notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error: $e';
-      notifyListeners();
-    }
-  }
-
-  Future toggleAMDFluidMotion(bool enable) async {
-    try {
-      if (amdFmfAvailable) {
-        await _mpvService.setAMDFluidMotion(enable);
-        amdFmfEnabled = enable;
-        playerInfo = 'AMD FMF: ${enable ? "ON" : "OFF"}';
-        notifyListeners();
+      if (isPlaying) {
+        await _service.pause();
+        phase = PlayerPhase.paused;
+      } else {
+        await _service.play();
+        phase = PlayerPhase.playing;
       }
-    } catch (e) {
-      playerInfo = 'Error: $e';
       notifyListeners();
+    } on Object catch (error) {
+      _setError('$error');
     }
   }
 
-  Future setAudioTrack(int trackIndex) async {
+  Future<void> seek(Duration value) async {
+    if (!canSeek) return;
     try {
-      await _mpvService.selectAudioTrack(trackIndex);
-      selectedAudioTrack = trackIndex;
+      await _service.seek(value);
+      position = value;
       notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error audio: $e';
-      notifyListeners();
+    } on Object catch (error) {
+      _setError('$error');
     }
   }
 
-  Future setSubtitleTrack(int trackIndex) async {
+  Future<void> refreshShaders() async {
+    final folder = await _shaderDirectory();
+    if (!await folder.exists()) await folder.create(recursive: true);
+    final shaders = <String>[];
+    await for (final entity in folder.list()) {
+      if (entity is File && entity.path.toLowerCase().endsWith('.glsl')) {
+        shaders.add(entity.path);
+      }
+    }
+    shaders.sort();
+    availableShaders = shaders;
+  }
+
+  Future<void> applyShader(String path) async {
     try {
-      await _mpvService.selectSubtitleTrack(trackIndex);
-      selectedSubtitleTrack = trackIndex;
+      await _service.applyShader(path);
+      activeShader = path;
+      message = 'Shader activo: ${File(path).uri.pathSegments.last}';
       notifyListeners();
-    } catch (e) {
-      playerInfo = 'Error subtítulo: $e';
-      notifyListeners();
+    } on Object catch (error) {
+      _setError('$error');
     }
   }
 
-  Future updatePlayerStatus() async {
+  Future<void> removeShader() async {
     try {
-      final status = await _mpvService.getPlayerStatus();
-      isPlaying = status['playing'] ?? false;
-      currentPosition = status['position'] ?? 0;
-      duration = status['duration'] ?? 0;
+      await _service.removeShaders();
+      activeShader = null;
+      message = 'Shaders desactivados.';
       notifyListeners();
-    } catch (e) {
-      // Silent error
+    } on Object catch (error) {
+      _setError('$error');
     }
+  }
+
+  Future<Directory> shaderDirectory() => _shaderDirectory();
+
+  Future<void> refreshStatus() async {
+    if (_refreshing || !isInitialized || !hasMedia) return;
+    _refreshing = true;
+    try {
+      final status = await _service.getStatus();
+      position = status.position;
+      duration = status.duration;
+      if (phase != PlayerPhase.loading && phase != PlayerPhase.error) {
+        phase = status.isPlaying ? PlayerPhase.playing : PlayerPhase.paused;
+      }
+      notifyListeners();
+    } catch (_) {
+      // mpv can briefly reject reads while opening or closing a file.
+    } finally {
+      _refreshing = false;
+    }
+  }
+
+  Future<Directory> _shaderDirectory() async {
+    final appData = Platform.environment['APPDATA'];
+    final base =
+        appData == null || appData.isEmpty ? Directory.current.path : appData;
+    return Directory(
+        '$base${Platform.pathSeparator}KPlayerF${Platform.pathSeparator}shaders');
+  }
+
+  void _setError(String error) {
+    phase = PlayerPhase.error;
+    message = error;
+    notifyListeners();
   }
 
   @override
   void dispose() {
-    _mpvService.dispose();
+    _statusTimer?.cancel();
+    _service.dispose();
     super.dispose();
   }
 }

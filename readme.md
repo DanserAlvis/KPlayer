@@ -1,42 +1,49 @@
-KPlayer Titanium 🎬
-El reproductor definitivo para entusiastas. Potenciado por MPV, acelerado por GPU y diseñado con una interfaz WPF moderna y oscura.
+# KPlayerF
 
-✨ Características Principales
-KPlayer Titanium no es solo otro frontend de MPV. Está optimizado para rendimiento extremo y calidad visual en Anime y Cine.
-<img width="1057" height="744" alt="image" src="https://github.com/user-attachments/assets/7933d4a3-763f-4868-8047-e1f04cbbde2f" />
+Reproductor de vídeo para Windows construido con Flutter y la API cliente de
+libmpv. Es un proyecto Flutter; no utiliza WPF ni .NET.
 
-🚀 Motor Híbrido de Interpolación:
+## Estado actual
 
-Nativo: Reproducción fiel a 24fps.
+- Selección y reproducción de archivos mediante libmpv.
+- Pausa, reanudación y salto temporal.
+- Decodificación por hardware configurada como `auto-safe` por mpv.
+- Aplicación de shaders GLSL que el usuario coloque en su carpeta local.
 
-GPU Sphinx: Interpolación temporal avanzada por hardware (sin carga de CPU).
+El vídeo se abre en una ventana gestionada por mpv. Incrustarlo dentro de la
+ventana de Flutter requiere una implementación nativa adicional de `wid` o
+una textura de Flutter y no se presenta como funcionalidad terminada.
 
-Smooth Mix: Suavizado ligero para el día a día.
+AMD Fluid Motion Frames se configura en el controlador AMD, no mediante una
+opción de libmpv; por ello la aplicación no muestra un interruptor ficticio.
 
-💎 Escalado IA (Anime4K):
+## Requisitos
 
-Integración nativa de shaders Anime4K (Modos A y AA) para escalar contenido 1080p a 4K con nitidez cristalina.
+- Windows 10/11 x64.
+- Flutter estable y las herramientas de compilación de Windows.
+- Una DLL x64 de libmpv llamada `libmpv-2.dll`.
 
-🎨 Interfaz Titanium UI:
+Coloca la DLL en `third_party/libmpv/libmpv-2.dll` antes de `flutter build
+windows`. CMake la incluirá en el directorio final. No incluyas DLLs de origen
+desconocido: deben coincidir en arquitectura con el ejecutable y respetar la
+licencia de libmpv y sus dependencias.
 
-Diseño minimalista "Dark Mode" con acentos en Rosa Neón (#FF0057).
+## Desarrollo
 
-Borderless Fullscreen: Hook nativo de Win32 para una pantalla completa perfecta y sin bordes.
+```powershell
+flutter pub get
+flutter analyze
+flutter test
+flutter run -d windows
+```
 
-Controles OSD flotantes y ocultamiento automático del ratón.
+## Shaders
 
-⚡ Rendimiento Máximo:
+Guarda archivos `.glsl` en `%APPDATA%\KPlayerF\shaders` y pulsa actualizar en
+la interfaz. El proyecto no descarga código ni shaders automáticamente.
 
-Prioridad de proceso ALTA automática.
+## Límites y siguientes pasos
 
-Compilación ReadyToRun para inicio instantáneo.
-
-Decodificación por hardware (D3D11 / Copy) seleccionable.
-
-🎒 100% Portable:
-
-Toda la configuración se guarda en un archivo settings.json junto al ejecutable. Llévalo en tu USB y mantén tus preferencias.
-
-🧠 Navegación Inteligente:
-
-Detección automática de archivos en la carpeta para botones "Siguiente/Anterior".
+Para una aplicación de producción conviene añadir una ventana/vídeo incrustado
+en Flutter, lectura de la lista de pistas de mpv, persistencia de preferencias,
+control de pantalla completa y pruebas de integración con una DLL conocida.

@@ -87,6 +87,14 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# libmpv is intentionally supplied by the application, not by a Flutter
+# plugin. Place the matching Windows runtime in third_party/libmpv before a
+# release build; OPTIONAL keeps development builds usable without it.
+install(FILES "${CMAKE_SOURCE_DIR}/third_party/libmpv/libmpv-2.dll"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  OPTIONAL
+  COMPONENT Runtime)
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"
