@@ -1,5 +1,7 @@
 # KPlayerF
 
+<img width="1006" height="649" alt="image" src="https://github.com/user-attachments/assets/e352aafc-e71e-425e-aeab-06295bdf2b74" />
+
 Reproductor de vídeo para Windows construido con Flutter y la API cliente de
 libmpv. Es un proyecto Flutter; no utiliza WPF ni .NET.
 
