@@ -9,7 +9,7 @@ void main() async {
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({Key? key}) : super(key: key);
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -22,7 +22,7 @@ class MyApp extends StatelessWidget {
           seedColor: const Color(0xFF667eea),
           brightness: Brightness.dark,
         ),
-        fontFamily: 'Roboto',
+        fontFamily: 'Segoe UI',
       ),
       home: ChangeNotifierProvider(
         create: (_) => PlayerProvider(),

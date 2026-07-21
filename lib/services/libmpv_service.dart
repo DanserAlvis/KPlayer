@@ -1,213 +1,208 @@
-import 'dart:core';
+// ignore_for_file: curly_braces_in_flow_control_structures
+
 import 'dart:ffi';
 import 'dart:io';
+
 import 'package:ffi/ffi.dart';
 
+import '../models/player_status.dart';
+
+/// Binding deliberately kept small: all player operations go through mpv's
+/// stable client API, rather than composing shell commands.
 class LibmpvService {
-  static const String _libName = 'libmpv';
-  late DynamicLibrary _dylib;
-  late Pointer _mpvHandle;
-  bool _initialized = false;
+  DynamicLibrary? _library;
+  Pointer<Void>? _handle;
+
+  bool get isInitialized => _handle != null;
 
   Future<void> initialize() async {
+    if (isInitialized) {
+      return;
+    }
+    if (!Platform.isWindows) {
+      throw UnsupportedError('KPlayerF actualmente solo admite Windows.');
+    }
+
     try {
-      if (_initialized) return;
-
-      if (Platform.isWindows) {
-        _dylib = DynamicLibrary.open('libmpv-2.dll');
-      } else if (Platform.isLinux) {
-        _dylib = DynamicLibrary.open('libmpv.so.1');
-      } else if (Platform.isMacOS) {
-        _dylib = DynamicLibrary.open('libmpv.2.dylib');
+      _library = DynamicLibrary.open('libmpv-2.dll');
+      final handle = _create()();
+      if (handle == nullptr) {
+        throw StateError('libmpv no pudo crear una instancia.');
       }
+      _handle = handle;
 
-      final mpvCreate = _dylib.lookupFunction<
-          Pointer Function(),
-          Pointer Function()>('mpv_create');
-      
-      _mpvHandle = mpvCreate();
+      _setOption('terminal', 'no');
+      _setOption('input-default-bindings', 'yes');
+      _setOption('force-window', 'yes');
+      _setOption('keep-open', 'yes');
+      _setOption('hwdec', 'auto-safe');
 
-      final mpvInitialize = _dylib.lookupFunction<
-          Int32 Function(Pointer),
-          int Function(Pointer)>('mpv_initialize');
-      
-      final initResult = mpvInitialize(_mpvHandle);
-      if (initResult < 0) {
-        throw Exception('MPV init failed: $initResult');
+      final result = _initialize()(handle);
+      if (result < 0) {
+        _destroy();
+        throw StateError('mpv_initialize falló (código $result).');
       }
-
-      _loadShaderDirectory();
-      _initialized = true;
-    } catch (e) {
-      throw Exception('Initialize error: $e');
+    } on Object catch (error) {
+      _destroy();
+      throw StateError(
+        'No se pudo iniciar libmpv. Instala libmpv-2.dll junto al ejecutable. '
+        'Detalle: $error',
+      );
     }
   }
 
   Future<void> loadFile(String filePath) async {
-    try {
-      if (!_initialized) throw Exception('MPV not initialized');
-      final command = ['loadfile', filePath].join('\u0000');
-      _commandMpv(command);
-    } catch (e) {
-      throw Exception('Load file error: $e');
-    }
+    _requireInitialized();
+    _command(['loadfile', filePath, 'replace']);
   }
 
-  Future<void> play() async {
-    try {
-      _commandMpv('set pause false');
-    } catch (e) {
-      throw Exception('Play error: $e');
-    }
+  Future<void> play() async => _setProperty('pause', 'no');
+
+  Future<void> pause() async => _setProperty('pause', 'yes');
+
+  Future<void> seek(Duration position) async {
+    _command(['seek', '${position.inMilliseconds / 1000}', 'absolute']);
   }
 
-  Future<void> pause() async {
-    try {
-      _commandMpv('set pause true');
-    } catch (e) {
-      throw Exception('Pause error: $e');
-    }
+  Future<void> setAudioTrack(int trackId) async {
+    _setProperty('aid', '$trackId');
   }
 
-  Future<void> seek(double position) async {
-    try {
-      _commandMpv('seek ${position.toStringAsFixed(2)} absolute');
-    } catch (e) {
-      throw Exception('Seek error: $e');
-    }
+  Future<void> setSubtitleTrack(int? trackId) async {
+    _setProperty('sid', trackId?.toString() ?? 'no');
   }
 
-  Future<List<dynamic>> getAvailableShaders() async {
-    try {
-      final shaderDir = _getShaderDirectory();
-      final dir = Directory(shaderDir);
+  Future<void> applyShader(String shaderPath) async {
+    final file = File(shaderPath);
+    if (!await file.exists()) {
+      throw ArgumentError.value(shaderPath, 'shaderPath');
+    }
+    _command(['change-list', 'glsl-shaders', 'set', file.absolute.path]);
+  }
 
-      if (!await dir.exists()) {
-        await dir.create(recursive: true);
-        await _downloadAnime4kShaders(shaderDir);
+  Future<void> removeShaders() async {
+    _command(['change-list', 'glsl-shaders', 'clr']);
+  }
+
+  Future<PlayerStatus> getStatus() async {
+    _requireInitialized();
+    final position = _numberProperty('time-pos');
+    final duration = _numberProperty('duration');
+    final paused = _stringProperty('pause')?.toLowerCase() == 'yes';
+    return PlayerStatus(
+      isPlaying: !paused && position != null,
+      position: Duration(milliseconds: ((position ?? 0) * 1000).round()),
+      duration: Duration(milliseconds: ((duration ?? 0) * 1000).round()),
+    );
+  }
+
+  void _command(List<String> arguments) {
+    _requireInitialized();
+    final argv = calloc<Pointer<Utf8>>(arguments.length + 1);
+    final nativeArguments =
+        arguments.map((value) => value.toNativeUtf8()).toList();
+    try {
+      for (var index = 0; index < nativeArguments.length; index++) {
+        argv[index] = nativeArguments[index];
       }
-
-      final shaders = [];
-      await for (final entity in dir.list()) {
-        if (entity is File && entity.path.endsWith('.glsl')) {
-          shaders.add(entity.uri.pathSegments.last);
-        }
+      argv[arguments.length] = nullptr;
+      final result = _commandNative()(_handle!, argv);
+      if (result < 0)
+        throw StateError('mpv rechazó el comando (código $result).');
+    } finally {
+      for (final argument in nativeArguments) {
+        calloc.free(argument);
       }
-      return shaders;
-    } catch (e) {
-      throw Exception('Get shaders error: $e');
+      calloc.free(argv);
     }
   }
 
-  Future<void> applyShader(String shaderName) async {
+  void _setOption(String name, String value) {
+    final nativeName = name.toNativeUtf8();
+    final nativeValue = value.toNativeUtf8();
     try {
-      final shaderPath = '${_getShaderDirectory()}/$shaderName';
-      _commandMpv('set glsl-shaders "$shaderPath"');
-    } catch (e) {
-      throw Exception('Apply shader error: $e');
+      final result = _setOptionString()(_handle!, nativeName, nativeValue);
+      if (result < 0)
+        throw StateError('No se pudo configurar $name ($result).');
+    } finally {
+      calloc.free(nativeName);
+      calloc.free(nativeValue);
     }
   }
 
-  Future<void> removeShader() async {
+  void _setProperty(String name, String value) {
+    _requireInitialized();
+    final nativeName = name.toNativeUtf8();
+    final nativeValue = value.toNativeUtf8();
     try {
-      _commandMpv('set glsl-shaders ""');
-    } catch (e) {
-      throw Exception('Remove shader error: $e');
+      final result = _setPropertyString()(_handle!, nativeName, nativeValue);
+      if (result < 0)
+        throw StateError('No se pudo actualizar $name ($result).');
+    } finally {
+      calloc.free(nativeName);
+      calloc.free(nativeValue);
     }
   }
 
-  Future<bool> checkAMDFluidMotion() async {
+  String? _stringProperty(String name) {
+    final nativeName = name.toNativeUtf8();
     try {
-      if (!Platform.isWindows) return false;
-      return false;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  Future<void> setAMDFluidMotion(bool enable) async {
-    try {
-      if (enable) {
-        _commandMpv('set video-sync-adrop-size 1000');
-      } else {
-        _commandMpv('set video-sync-adrop-size 0');
+      final value = _getPropertyString()(_handle!, nativeName);
+      if (value == nullptr) return null;
+      try {
+        return value.toDartString();
+      } finally {
+        _free()(value.cast<Void>());
       }
-    } catch (e) {
-      throw Exception('AMD FMF error: $e');
+    } finally {
+      calloc.free(nativeName);
     }
   }
 
-  Future<void> selectAudioTrack(int trackIndex) async {
-    try {
-      _commandMpv('set aid $trackIndex');
-    } catch (e) {
-      throw Exception('Audio track error: $e');
-    }
+  double? _numberProperty(String name) =>
+      double.tryParse(_stringProperty(name) ?? '');
+
+  void _requireInitialized() {
+    if (!isInitialized) throw StateError('libmpv aún no está inicializado.');
   }
 
-  Future<void> selectSubtitleTrack(int trackIndex) async {
-    try {
-      if (trackIndex < 0) {
-        _commandMpv('set sid no');
-      } else {
-        _commandMpv('set sid $trackIndex');
-      }
-    } catch (e) {
-      throw Exception('Subtitle error: $e');
-    }
+  Pointer<Void> Function() _create() => _library!
+      .lookupFunction<Pointer<Void> Function(), Pointer<Void> Function()>(
+          'mpv_create');
+  int Function(Pointer<Void>) _initialize() => _library!.lookupFunction<
+      Int32 Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('mpv_initialize');
+  int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)
+      _setOptionString() => _library!.lookupFunction<
+          Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
+          int Function(Pointer<Void>, Pointer<Utf8>,
+              Pointer<Utf8>)>('mpv_set_option_string');
+  int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)
+      _setPropertyString() => _library!.lookupFunction<
+          Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
+          int Function(Pointer<Void>, Pointer<Utf8>,
+              Pointer<Utf8>)>('mpv_set_property_string');
+  int Function(Pointer<Void>, Pointer<Pointer<Utf8>>) _commandNative() =>
+      _library!.lookupFunction<
+          Int32 Function(Pointer<Void>, Pointer<Pointer<Utf8>>),
+          int Function(Pointer<Void>, Pointer<Pointer<Utf8>>)>('mpv_command');
+  Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>) _getPropertyString() =>
+      _library!.lookupFunction<
+          Pointer<Utf8> Function(Pointer<Void>, Pointer<Utf8>),
+          Pointer<Utf8> Function(
+              Pointer<Void>, Pointer<Utf8>)>('mpv_get_property_string');
+  void Function(Pointer<Void>) _free() => _library!.lookupFunction<
+      Void Function(Pointer<Void>), void Function(Pointer<Void>)>('mpv_free');
+  void Function(Pointer<Void>) _terminateDestroy() => _library!.lookupFunction<
+      Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('mpv_terminate_destroy');
+
+  void _destroy() {
+    final handle = _handle;
+    if (handle != null && handle != nullptr && _library != null)
+      _terminateDestroy()(handle);
+    _handle = null;
   }
 
-  Future<Map<String, Object>> getPlayerStatus() async {
-    try {
-      return {
-        'playing': true,
-        'position': 0.0,
-        'duration': 0.0,
-      };
-    } catch (e) {
-      return {'playing': false, 'position': 0.0, 'duration': 0.0};
-    }
-  }
-
-  void _commandMpv(String command) {
-    // Send command to MPV
-  }
-
-  void _loadShaderDirectory() {
-    final shaderDir = _getShaderDirectory();
-    _commandMpv('glsl-shaders-dir=$shaderDir');
-  }
-
-  String _getShaderDirectory() {
-    if (Platform.isWindows) {
-      return '${Platform.environment['APPDATA']}\\animeflutter_player\\shaders\\anime4k';
-    } else if (Platform.isLinux) {
-      return '${Platform.environment['HOME']}/.config/animeflutter_player/shaders/anime4k';
-    } else {
-      return '${Platform.environment['HOME']}/Library/Application Support/animeflutter_player/shaders/anime4k';
-    }
-  }
-
-  Future<void> _downloadAnime4kShaders(String targetDir) async {
-    try {
-      print('Downloading Anime4K shaders to: $targetDir');
-    } catch (e) {
-      print('Download error: $e');
-    }
-  }
-
-  void dispose() {
-    try {
-      if (_initialized) {
-        final mpvTerminateDestroy = _dylib.lookupFunction<
-            Void Function(Pointer),
-            void Function(Pointer)>('mpv_terminate_destroy');
-        
-        mpvTerminateDestroy(_mpvHandle);
-        _initialized = false;
-      }
-    } catch (e) {
-      print('Dispose error: $e');
-    }
-  }
+  void dispose() => _destroy();
 }
